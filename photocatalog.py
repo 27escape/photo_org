@@ -85,7 +85,7 @@ def abort_handler(sig, frame):
 
 signal.signal(signal.SIGHUP, abort_handler)
 
-# --- Logging Setup ---
+# ----------------------------------------------------------------------------
 def setup_logging(log_level_str="INFO"):
     """Configures logging for the script."""
     numeric_level = getattr(logging, log_level_str.upper(), None)
@@ -97,7 +97,6 @@ def setup_logging(log_level_str="INFO"):
         format='%(asctime)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-
 
 
 # ----------------------------------------------------------------------------
