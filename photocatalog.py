@@ -22,11 +22,14 @@
 # can you add an option to copy instead of move
 
 import os
+import re
 import shutil
+import signal
 import hashlib
 import argparse
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from stat import *
 import piexif # Changed from Pillow for EXIF
 
 # Supported file extensions (case-insensitive)
@@ -51,10 +54,36 @@ ALL_EXTENSIONS = (
     '.avi', '.mp4', '.mov'
 )
 
+REQUIRED_TAGS = [
+    "DateTimeOriginal",
+    "OffsetTimeOriginal",
+]
+
 # Define which extensions are typically non-image/video for EXIF purposes if needed
 # For piexif, we'll attempt EXIF on most non-video files.
 VIDEO_EXTENSIONS = ('.avi', '.mp4', '.mov')
 
+# ----------------------------------------------------------------------------
+
+def signal_handler(sig, frame):
+    """ """
+
+    logger.info("Ctrl+C pressed!")
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGHUP, signal_handler)
+
+
+def abort_handler(sig, frame):
+    """ """
+
+    logger.info("Ctrl+C pressed!")
+    sys.exit(0)
+
+
+signal.signal(signal.SIGHUP, abort_handler)
 
 # --- Logging Setup ---
 def setup_logging(log_level_str="INFO"):
@@ -69,7 +98,127 @@ def setup_logging(log_level_str="INFO"):
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-# --- Helper Functions ---
+
+
+# ----------------------------------------------------------------------------
+def is_valid_extension(filename, extensions):
+    """
+    Validates if the filename has an extension from the provided list.
+
+    Args:
+        filename (str): The name of the file to validate.
+        extensions (list): A list of allowed extensions.
+
+    Returns:
+        bool: True if the filename has a valid extension, False otherwise.
+    """
+    return any(filename.lower().endswith(ext.lower()) for ext in extensions)
+
+# ----------------------------------------------------------------------------
+def UTC_from_exif(original, offset):
+  """
+  Calculates UTC time from EXIF DateTimeOriginal and EXIF OffsetTimeOriginal.
+
+  Args:
+    original: String original datetime "YYYY:MM:DD HH:MM:SS"
+    offset:   String   time offset "HH:MM:SS"
+
+  Returns:
+    UTC time "YYYY-MM-DD HH:MM:SS+00:00"
+  """
+
+  try:
+    # Parse original
+    dt_obj = datetime.strptime(original, "%Y:%m:%d %H:%M:%S")
+    if not offset:
+      offset = "00:00"
+
+    # Parse offset hours/minutes
+    offset_hours, offset_minutes = map(int, offset.split(':'))
+    offset_timedelta = timedelta(hours=offset_hours, minutes=offset_minutes)
+
+    # Calculate UTC time
+    utc_time = dt_obj - offset_timedelta
+
+    # Convert to UTC timezone
+    utc_time = utc_time.replace(tzinfo=timezone.utc)
+
+    # Format UTC time as string
+    return utc_time.strftime("%Y-%m-%d %H:%M:%S%z")
+
+  except ValueError:
+    #   possibly happens if time offset is bad
+    logger.error(f"ValueError: Invalid datetime or offset format: {original}, {offset}, reseting to 1970")
+    dt_obj = datetime.strptime("1970:01:01 00:00:00", "%Y:%m:%d %H:%M:%S")
+    return dt_obj.strftime("%Y-%m-%d %H:%M:%S%z")
+  except Exception as err:
+    logger.error(f"{type(err).__name__} was raised: {err}")
+    return dt_obj.strftime("%Y-%m-%d %H:%M:%S%z")
+
+# ----------------------------------------------------------------------------
+
+def get_file_ctime(file_path):
+    """
+    Get the creation date of a file.
+
+    Args:
+        file_path (str): The path to the file.
+
+    Returns:
+        datetime: The creation date of the file.
+    """
+    try:
+        # Get the file's status
+        stat_info = os.stat(file_path)
+        # Get the creation time (st_ctime) and convert it to a datetime object
+        creation_time = datetime.fromtimestamp(stat_info.st_ctime)
+        # put it in the same format that exif uses
+        return creation_time.strftime("%Y:%m:%d %H:%M:%S")
+    except Exception as e:
+        logger.error(f"Error getting creation date: {e}")
+        return None
+
+
+# ----------------------------------------------------------------------------
+def extract_exif(file_path):
+    """
+    Extracts EXIF data from an image file and filters it based on REQUIRED_TAGS.
+
+    Args:
+        file_path (str): The path to the image file.
+
+    Returns:
+        dict: A dictionary containing the required EXIF tags and their values.
+    """
+    info = {}
+    try:
+        # Load the EXIF data from the image
+        exif_data = piexif.load(file_path)
+
+        # Filter and extract only the required tags
+        for ifd_name in exif_data:
+            if ifd_name == "Exif":
+                for tag in exif_data[ifd_name]:
+                    tag_name = piexif.TAGS[ifd_name].get(tag, {}).get("name", None)
+                    if tag_name in REQUIRED_TAGS:
+                        tag_value = exif_data[ifd_name][tag]
+                        info[tag_name] = tag_value.decode( 'utf-8', errors='replace') if isinstance(tag_value, bytes) else tag_value
+                    else:
+                        # create empty tag if not found
+                        info[tag_name] = ""
+    except Exception as e:
+        info["DateTimeOriginal"] = get_file_ctime(file_path)
+        info["OffsetTimeOriginal"] = "00:00"
+    
+    # some cameras set a partially empty time offset
+    if re.match(r"^\s*:", info.get("OffsetTimeOriginal", "")):
+        info["OffsetTimeOriginal"] = "00:00"
+    
+    return info
+
+
+
+# ----------------------------------------------------------------------------
 def get_file_hash(filepath, block_size=65536):
     """Calculates the MD5 hash of a file."""
     hasher = hashlib.md5()
@@ -84,68 +233,17 @@ def get_file_hash(filepath, block_size=65536):
         logging.error(f"Could not read file {filepath} for hashing: {e}")
         return None
 
-def get_file_datetime(filepath):
-    """
-    Tries to get the file creation datetime using piexif for EXIF data.
-    Falls back to file system's modification time if EXIF is not available,
-    unreadable, or for video files.
-    Ensures all filepath operations are case-insensitive where appropriate.
-    """
-    file_ext_lower = os.path.splitext(filepath)[1].lower()
-
-    # Attempt EXIF reading for non-video files
-    if file_ext_lower not in VIDEO_EXTENSIONS:
-        try:
-            exif_dict = piexif.load(filepath)
-            date_str_bytes = None
-            
-            # Preferred EXIF date tags using piexif constants
-            preferred_tags = [
-                piexif.ExifIFD.DateTimeOriginal,
-                piexif.ExifIFD.DateTimeDigitized,
-                piexif.ExifIFD.DateTime # General DateTime
-            ]
-
-            for tag in preferred_tags:
-                if 'Exif' in exif_dict and tag in exif_dict['Exif']:
-                    date_str_bytes = exif_dict['Exif'][tag]
-                    break
-                # Sometimes DateTime is in the '0th' IFD for some formats/cameras
-                elif '0th' in exif_dict and tag in exif_dict['0th'] and tag == piexif.ExifIFD.DateTime : # only DateTime is common in 0th
-                     date_str_bytes = exif_dict['0th'][tag]
-                     break
-
-
-            if date_str_bytes:
-                exif_date_str = date_str_bytes.decode('utf-8').strip()
-                # Common EXIF date format: 'YYYY:MM:DD HH:MM:SS'
-                try:
-                    return datetime.strptime(exif_date_str, '%Y:%m:%d %H:%M:%S')
-                except ValueError:
-                    try:
-                        # Attempt to parse just the date part if time is malformed or missing
-                        return datetime.strptime(exif_date_str.split(' ')[0], '%Y:%m:%d')
-                    except ValueError:
-                        logging.warning(f"Could not parse EXIF date string '{exif_date_str}' from {filepath} using piexif. Trying file timestamp.")
-            else:
-                logging.debug(f"No suitable EXIF date tag found for {filepath} using piexif. Using file timestamp.")
-
-        except piexif.InvalidImageDataError: # piexif specific error for non-EXIF/corrupt
-            logging.warning(f"piexif could not read EXIF data (InvalidImageDataError) for {filepath}. Using file timestamp.")
-        except IOError as e:
-            logging.warning(f"IOError opening {filepath} for piexif EXIF: {e}. Using file timestamp.")
-        except Exception as e:
-            logging.warning(f"Generic error reading EXIF with piexif for {filepath}: {e}. Using file timestamp.")
-    else:
-        logging.debug(f"File {filepath} is a video. Using file timestamp.")
-
-    # Fallback to file modification time
+def get_file_datetime_from_exif(filepath):
+        
     try:
-        stat_info = os.stat(filepath)
-        return datetime.fromtimestamp(stat_info.st_mtime)
-    except OSError as e:
-        logging.error(f"Could not get file timestamp for {filepath}: {e}")
-        return None
+        tags = extract_exif( filepath)
+        if tags.get("DateTimeOriginal"):
+            utc = UTC_from_exif( tags["DateTimeOriginal"], tags.get("OffsetTimeOriginal", "00:00"))
+    except Exception as e:
+        logger.error(f"Error extracting EXIF data: {e}")
+        utc = get_file_ctime( filepath)
+    # return datetime.strptime(utc, "%Y-%m-%d %H:%M:%S%z") if utc else None
+    return utc
 
 
 def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dry_run=False, copy_mode=False):
@@ -168,6 +266,8 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
     processed_file_hashes = set() 
     
     if not dry_run:
+        # if millions of files are processed, this can take a while
+        # also RAM usage could be high and potentially cause issues
         logging.info("Scanning destination directory for existing file hashes...")
         for root, _, files in os.walk(dest_base_dir):
             for filename in files:
@@ -185,6 +285,7 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
     files_skipped_duplicates = 0
     files_renamed = 0
     files_errored = 0
+    dups_removed = 0 
 
     # Determine file operation based on copy_mode
     action_verb = "copy" if copy_mode else "move"
@@ -196,113 +297,121 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
 
 
     logging.info(f"Scanning source directory: {source_dir}")
-    for item_name in os.listdir(source_dir):
-        print( f"Processing item: {item_name}") # Debugging line to see what is being processed
-        source_filepath = os.path.join(source_dir, item_name)
+    for root, _, files in os.walk(source_dir):
+        for item_name in files:
+            source_filepath = os.path.join(root, item_name)
 
-        if not os.path.isfile(source_filepath):
-            logging.debug(f"Skipping non-file item: {item_name}")
-            continue
+            if not os.path.isfile(source_filepath):
+                logging.debug(f"Skipping non-file item: {item_name}")
+                continue
 
-        # Case-insensitive extension check
-        if not item_name.lower().endswith(ALL_EXTENSIONS):
-            logging.debug(f"Skipping file with unsupported extension (case-insensitive check): {item_name}")
-            continue
-        
-        files_processed += 1
-        logging.info(f"Processing ({files_processed}): {source_filepath}")
+            # Case-insensitive extension check
+            if not item_name.lower().endswith(ALL_EXTENSIONS):
+                logging.debug(f"Skipping file with unsupported extension (case-insensitive check): {item_name}")
+                continue
 
-        file_dt = get_file_datetime(source_filepath)
-        if not file_dt:
-            logging.error(f"Could not determine date for {source_filepath}. Skipping.")
-            files_errored += 1
-            continue
+            files_processed += 1
+            logging.info(f"Processing ({files_processed}): {source_filepath}")
 
-        year_str = file_dt.strftime("%Y")
-        month_str = file_dt.strftime("%m") 
-        day_folder_name = file_dt.strftime("%Y-%m-%d")
+            file_dt = get_file_datetime_from_exif(source_filepath)
+            if not file_dt:
+                logging.error(f"Could not determine date for {source_filepath}. Skipping.")
+                files_errored += 1
+                continue
 
-        target_year_dir = os.path.join(dest_base_dir, year_str)
-        target_month_dir = os.path.join(target_year_dir, month_str)
-        target_day_dir = os.path.join(target_month_dir, day_folder_name)
+            day_folder_name = file_dt.split(' ')[0]
+            year_str,month_str,day_str = day_folder_name.split('-')
+            target_day_dir = os.path.join( dest_base_dir, year_str, day_folder_name)
 
-        source_file_hash = get_file_hash(source_filepath)
-        if not source_file_hash:
-            logging.error(f"Could not calculate hash for {source_filepath}. Skipping.")
-            files_errored +=1
-            continue
+            source_file_hash = get_file_hash(source_filepath)
+            if not source_file_hash:
+                logging.error(f"Could not calculate hash for {source_filepath}. Skipping.")
+                files_errored += 1
+                continue
 
-        if source_file_hash in processed_file_hashes:
-            logging.info(f"Exact duplicate of an already processed file (hash: {source_file_hash}). Skipping: {source_filepath}")
-            files_skipped_duplicates += 1
-            if delete_source_duplicates and not dry_run:
-                try:
-                    os.remove(source_filepath)
-                    logging.info(f"Deleted duplicate source file: {source_filepath}")
-                except OSError as e:
-                    logging.error(f"Could not delete duplicate source file {source_filepath}: {e}")
-            continue
-
-        original_filename = os.path.basename(source_filepath) # This preserves original case
-        current_target_filename = original_filename
-        target_filepath = os.path.join(target_day_dir, current_target_filename)
-        
-        name_collision_counter = 1
-        while os.path.exists(target_filepath):
-            existing_target_hash = get_file_hash(target_filepath)
-            if existing_target_hash == source_file_hash:
-                logging.info(f"Exact duplicate of file already in target location {target_filepath}. Skipping source.")
+            if source_file_hash in processed_file_hashes:
+                logging.info(f"Exact duplicate of an already processed file (hash: {source_file_hash}). Skipping: {source_filepath}")
                 files_skipped_duplicates += 1
                 if delete_source_duplicates and not dry_run:
-                     try:
+                    try:
                         os.remove(source_filepath)
+                        dups_removed += 1
                         logging.info(f"Deleted duplicate source file: {source_filepath}")
-                     except OSError as e:
+                    except OSError as e:
                         logging.error(f"Could not delete duplicate source file {source_filepath}: {e}")
-                source_filepath = None 
-                break 
-            else:
-                name, ext = os.path.splitext(original_filename) 
-                current_target_filename = f"{name}_{name_collision_counter}{ext}"
-                target_filepath = os.path.join(target_day_dir, current_target_filename)
-                logging.info(f"Name collision for {original_filename} in {target_day_dir}. Trying new name: {current_target_filename}")
-                if name_collision_counter == 1: 
-                    files_renamed +=1
-                name_collision_counter += 1
+                continue
 
-        if source_filepath is None: 
-            continue
+            original_filename = os.path.basename(source_filepath)  # This preserves original case
+            current_target_filename = original_filename
+            target_filepath = os.path.join(target_day_dir, current_target_filename)
 
-        if not os.path.exists(target_day_dir):
+            name_collision_counter = 1
+            while os.path.exists(target_filepath):
+                existing_target_hash = get_file_hash(target_filepath)
+                if existing_target_hash == source_file_hash:
+                    logging.info(f"Exact duplicate of file already in target location {target_filepath}. Skipping source.")
+                    files_skipped_duplicates += 1
+                    if delete_source_duplicates and not dry_run:
+                        try:
+                            os.remove(source_filepath)
+                            logging.info(f"Deleted duplicate source file: {source_filepath}")
+                        except OSError as e:
+                            logging.error(f"Could not delete duplicate source file {source_filepath}: {e}")
+                    source_filepath = None
+                    break
+                else:
+                    name, ext = os.path.splitext(original_filename)
+                    current_target_filename = f"{name}_{name_collision_counter}{ext}"
+                    target_filepath = os.path.join(target_day_dir, current_target_filename)
+                    logging.info(f"Name collision for {original_filename} in {target_day_dir}. Trying new name: {current_target_filename}")
+                    if name_collision_counter == 1:
+                        files_renamed += 1
+                    name_collision_counter += 1
+
+            if source_filepath is None:
+                continue
+
+            if not os.path.exists(target_day_dir):
+                if not dry_run:
+                    try:
+                        os.makedirs(target_day_dir, exist_ok=True)
+                        logging.info(f"Created directory: {target_day_dir}")
+                    except OSError as e:
+                        logging.error(f"Could not create directory {target_day_dir}: {e}")
+                        files_errored += 1
+                        continue
+                else:
+                    logging.info(f"[DRY RUN] Would create directory: {target_day_dir}")
+            elif os.path.exists(target_day_dir) and not os.path.isdir(target_day_dir):
+                logging.error(f"Target path {target_day_dir} exists but is not a directory. Skipping file {source_filepath}")
+                files_errored += 1
+                continue
+
+            logging.info(f"{'[DRY RUN] Would ' + action_verb if dry_run else action_gerund} '{source_filepath}' to '{target_filepath}'")
             if not dry_run:
                 try:
-                    os.makedirs(target_day_dir, exist_ok=True)
-                    logging.info(f"Created directory: {target_day_dir}")
-                except OSError as e:
-                    logging.error(f"Could not create directory {target_day_dir}: {e}")
+                    file_operation_func(source_filepath, target_filepath)  # Use selected operation
+                    processed_file_hashes.add(source_file_hash)
+                    files_transferred += 1
+                except Exception as e:
+                    logging.error(f"Could not {action_verb} {source_filepath} to {target_filepath}: {e}")
                     files_errored += 1
                     continue
             else:
-                logging.info(f"[DRY RUN] Would create directory: {target_day_dir}")
-        elif os.path.exists(target_day_dir) and not os.path.isdir(target_day_dir):
-             logging.error(f"Target path {target_day_dir} exists but is not a directory. Skipping file {source_filepath}")
-             files_errored +=1
-             continue
-
-        logging.info(f"{'[DRY RUN] Would ' + action_verb if dry_run else action_gerund} '{source_filepath}' to '{target_filepath}'")
-        if not dry_run:
-            try:
-                file_operation_func(source_filepath, target_filepath) # Use selected operation
-                processed_file_hashes.add(source_file_hash) 
+                processed_file_hashes.add(source_file_hash)
                 files_transferred += 1
-            except Exception as e:
-                logging.error(f"Could not {action_verb} {source_filepath} to {target_filepath}: {e}")
-                files_errored += 1
-                continue
-        else: 
-            processed_file_hashes.add(source_file_hash) 
-            files_transferred += 1
-
+ 
+ 
+    # Remove empty directories in source_dir if requested
+    if delete_source_duplicates and not dry_run:
+        for dirpath, dirnames, filenames in os.walk(source_dir, topdown=False):
+            # Only remove if directory is empty (no files and no subdirs)
+            if not dirnames and not filenames:
+                try:
+                    os.rmdir(dirpath)
+                    logging.info(f"Removed empty directory: {dirpath}")
+                except Exception as e:
+                    logging.warning(f"Could not remove directory {dirpath}: {e}")
 
     logging.info("--- Organization Summary ---")
     logging.info(f"Total files scanned in source: {files_processed}")
@@ -314,10 +423,11 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
     
     logging.info(f"Files skipped (exact duplicates): {files_skipped_duplicates}")
     logging.info(f"Files renamed due to name collision (different content): {files_renamed}")
+    logging.info(f"File duplicates removed from source: {dups_removed}")
     logging.info(f"Files with errors: {files_errored}")
     logging.info("---------------------------")
 
-
+# ----------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
         description="Organize photos and videos into YYYY/MM/YYYY-MM-DD directories. "
@@ -368,6 +478,8 @@ def main():
 
     if args.dry_run:
         logging.info("*** DRY RUN finished. ***")
+
+# ----------------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
