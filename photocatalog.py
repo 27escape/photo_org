@@ -68,7 +68,7 @@ VIDEO_EXTENSIONS = ('.avi', '.mp4', '.mov')
 def signal_handler(sig, frame):
     """ """
 
-    logger.info("Ctrl+C pressed!")
+    logging.info("Ctrl+C pressed!")
     sys.exit(0)
 
 
@@ -79,7 +79,7 @@ signal.signal(signal.SIGHUP, signal_handler)
 def abort_handler(sig, frame):
     """ """
 
-    logger.info("Ctrl+C pressed!")
+    logging.info("Ctrl+C pressed!")
     sys.exit(0)
 
 
@@ -148,11 +148,11 @@ def UTC_from_exif(original, offset):
 
   except ValueError:
     #   possibly happens if time offset is bad
-    logger.error(f"ValueError: Invalid datetime or offset format: {original}, {offset}, reseting to 1970")
+    logging.error(f"ValueError: Invalid datetime or offset format: {original}, {offset}, reseting to 1970")
     dt_obj = datetime.strptime("1970:01:01 00:00:00", "%Y:%m:%d %H:%M:%S")
     return dt_obj.strftime("%Y-%m-%d %H:%M:%S%z")
   except Exception as err:
-    logger.error(f"{type(err).__name__} was raised: {err}")
+    logging.error(f"{type(err).__name__} was raised: {err}")
     return dt_obj.strftime("%Y-%m-%d %H:%M:%S%z")
 
 # ----------------------------------------------------------------------------
@@ -175,7 +175,7 @@ def get_file_ctime(file_path):
         # put it in the same format that exif uses
         return creation_time.strftime("%Y:%m:%d %H:%M:%S")
     except Exception as e:
-        logger.error(f"Error getting creation date: {e}")
+        logging.error(f"Error getting creation date: {e}")
         return None
 
 
@@ -234,15 +234,18 @@ def get_file_hash(filepath, block_size=65536):
         return None
 
 def get_file_datetime_from_exif(filepath):
-        
+      
+    utc = 0     
     try:
         tags = extract_exif( filepath)
         if tags.get("DateTimeOriginal"):
             utc = UTC_from_exif( tags["DateTimeOriginal"], tags.get("OffsetTimeOriginal", "00:00"))
+        else:
+            utc = get_file_ctime( filepath)
+
     except Exception as e:
-        logger.error(f"Error extracting EXIF data: {e}")
+        logging.error(f"Error extracting EXIF data: {e}")
         utc = get_file_ctime( filepath)
-    # return datetime.strptime(utc, "%Y-%m-%d %H:%M:%S%z") if utc else None
     return utc
 
 
