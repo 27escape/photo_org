@@ -128,7 +128,14 @@ def UTC_from_exif(original, offset):
 
   try:
     # Parse original
-    dt_obj = datetime.strptime(original, "%Y:%m:%d %H:%M:%S")
+    # dt_obj = datetime.strptime(original, "%Y:%m:%d %H:%M:%S")
+    # Try parsing with both possible formats
+    try:
+        dt_obj = datetime.strptime(original, "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        dt_obj = datetime.strptime(original, "%Y-%m-%d %H:%M:%S")
+
+    
     if not offset:
       offset = "00:00"
 
@@ -172,7 +179,7 @@ def get_file_ctime(file_path):
         # Get the creation time (st_ctime) and convert it to a datetime object
         creation_time = datetime.fromtimestamp(stat_info.st_ctime)
         # put it in the same format that exif uses
-        return creation_time.strftime("%Y:%m:%d %H:%M:%S")
+        return creation_time.strftime("%Y-%m-%d %H:%M:%S")
     except Exception as e:
         logging.error(f"Error getting creation date: {e}")
         return None
@@ -213,11 +220,17 @@ def extract_exif(file_path):
     if re.match(r"^\s*:", info.get("OffsetTimeOriginal", "")):
         info["OffsetTimeOriginal"] = "00:00"
     
+    # if info.get("DateTimeOriginal"):
+    #     info["DateTimeOriginal"] = re.sub(r'\d{4}:\d{2}:\d{2}', r'\1-\2-\3', info["DateTimeOriginal"])
+    #     logging.debug(f"fixed DateTimeOriginal: {info['DateTimeOriginal']} from {file_path}")
+    
     return info
 
 
 
 # ----------------------------------------------------------------------------
+# will do hash of entire file, not just part of it, in case a version of the
+# file is corrupted and we then want to add the duplicate file to the catalog
 def get_file_hash(filepath, block_size=65536):
     """Calculates the MD5 hash of a file."""
     hasher = hashlib.md5()
@@ -271,6 +284,7 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
         # if millions of files are processed, this can take a while
         # also RAM usage could be high and potentially cause issues
         logging.info("Scanning destination directory for existing file hashes...")
+        hash_count = 0
         for root, _, files in os.walk(dest_base_dir):
             for filename in files:
                 # Case-insensitive extension check
@@ -279,8 +293,11 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
                     existing_hash = get_file_hash(existing_file_path)
                     if existing_hash:
                         processed_file_hashes.add(existing_hash)
+                        # print count of hashes added over itself
+                        hash_count += 1  # probs faster than len(processed_file_hashes)
+                        print(f"Hashes added: {hash_count}", end="\r", flush=True)                        
         logging.info(f"Found {len(processed_file_hashes)} existing unique files in destination.")
-
+    print( "")  # Clear the line after the progress print
 
     files_processed = 0
     files_transferred = 0 # Renamed from files_moved
@@ -296,7 +313,6 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
     # shutil.copy2 is used because it attempts to preserve file metadata 
     # (like timestamps) during the copy, which is generally desirable for photos and videos.
     file_operation_func = shutil.copy2 if copy_mode else shutil.move
-
 
     logging.info(f"Scanning source directory: {source_dir}")
     for root, _, files in os.walk(source_dir):
@@ -316,6 +332,7 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
             logging.info(f"Processing ({files_processed}): {source_filepath}")
 
             file_dt = get_file_datetime_from_exif(source_filepath)
+            logging.info( f"File date from EXIF or creation time: {file_dt}")
             if not file_dt:
                 logging.error(f"Could not determine date for {source_filepath}. Skipping.")
                 files_errored += 1
