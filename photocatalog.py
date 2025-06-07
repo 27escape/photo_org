@@ -36,7 +36,7 @@ import piexif # Changed from Pillow for EXIF
 # Includes common image, RAW, and some video formats
 ALL_EXTENSIONS = (
     # Standard Images
-    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.heic', '.heif',
+    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.heic', '.heif',
     # RAW Formats
     '.dng',                                 # Adobe Digital Negative
     '.cib',                                 # CorelDRAW CIB (less common as camera RAW)
@@ -51,7 +51,7 @@ ALL_EXTENSIONS = (
     '.raf',                                 # Fujifilm
     '.srw',                                 # Samsung
     # Video Formats
-    '.avi', '.mp4', '.mov'
+    '.avi', '.mp4', '.mov', '.m4v'
 )
 
 REQUIRED_TAGS = [
@@ -280,24 +280,24 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
 
     processed_file_hashes = set() 
     
-    if not dry_run:
-        # if millions of files are processed, this can take a while
-        # also RAM usage could be high and potentially cause issues
-        logging.info("Scanning destination directory for existing file hashes...")
-        hash_count = 0
-        for root, _, files in os.walk(dest_base_dir):
-            for filename in files:
-                # Case-insensitive extension check
-                if filename.lower().endswith(ALL_EXTENSIONS):
-                    existing_file_path = os.path.join(root, filename)
-                    existing_hash = get_file_hash(existing_file_path)
-                    if existing_hash:
-                        processed_file_hashes.add(existing_hash)
-                        # print count of hashes added over itself
-                        hash_count += 1  # probs faster than len(processed_file_hashes)
-                        print(f"Hashes added: {hash_count}", end="\r", flush=True)                        
-        logging.info(f"Found {len(processed_file_hashes)} existing unique files in destination.")
-    print( "")  # Clear the line after the progress print
+    # if not dry_run:
+    #     # if millions of files are processed, this can take a while
+    #     # also RAM usage could be high and potentially cause issues
+    #     logging.info("Scanning destination directory for existing file hashes...")
+    #     hash_count = 0
+    #     for root, _, files in os.walk(dest_base_dir):
+    #         for filename in files:
+    #             # Case-insensitive extension check
+    #             if filename.lower().endswith(ALL_EXTENSIONS):
+    #                 existing_file_path = os.path.join(root, filename)
+    #                 existing_hash = get_file_hash(existing_file_path)
+    #                 if existing_hash:
+    #                     processed_file_hashes.add(existing_hash)
+    #                     # print count of hashes added over itself
+    #                     hash_count += 1  # probs faster than len(processed_file_hashes)
+    #                     print(f"Hashes added: {hash_count}", end="\r", flush=True)                        
+    #     logging.info(f"Found {len(processed_file_hashes)} existing unique files in destination.")
+    # print( "")  # Clear the line after the progress print
 
     files_processed = 0
     files_transferred = 0 # Renamed from files_moved
@@ -364,9 +364,34 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
             current_target_filename = original_filename
             target_filepath = os.path.join(target_day_dir, current_target_filename)
 
+            # name_collision_counter = 1
+            # while os.path.exists(target_filepath):
+            #     existing_target_hash = get_file_hash(target_filepath)
+            #     if existing_target_hash == source_file_hash:
+            #         logging.info(f"Exact duplicate of file already in target location {target_filepath}. Skipping source.")
+            #         files_skipped_duplicates += 1
+            #         if delete_source_duplicates and not dry_run:
+            #             try:
+            #                 os.remove(source_filepath)
+            #                 logging.info(f"Deleted duplicate source file: {source_filepath}")
+            #             except OSError as e:
+            #                 logging.error(f"Could not delete duplicate source file {source_filepath}: {e}")
+            #         source_filepath = None
+            #         break
+            #     else:
+            #         name, ext = os.path.splitext(original_filename)
+            #         current_target_filename = f"{name}_{name_collision_counter}{ext}"
+            #         target_filepath = os.path.join(target_day_dir, current_target_filename)
+            #         logging.info(f"Name collision for {original_filename} in {target_day_dir}. Trying new name: {current_target_filename}")
+            #         if name_collision_counter == 1:
+            #             files_renamed += 1
+            #         name_collision_counter += 1
+
             name_collision_counter = 1
             while os.path.exists(target_filepath):
+                # Only calculate hashes if there is a name collision
                 existing_target_hash = get_file_hash(target_filepath)
+                source_file_hash = get_file_hash(source_filepath)
                 if existing_target_hash == source_file_hash:
                     logging.info(f"Exact duplicate of file already in target location {target_filepath}. Skipping source.")
                     files_skipped_duplicates += 1
@@ -386,6 +411,7 @@ def organize_media(source_dir, dest_base_dir, delete_source_duplicates=False, dr
                     if name_collision_counter == 1:
                         files_renamed += 1
                     name_collision_counter += 1
+
 
             if source_filepath is None:
                 continue
@@ -456,11 +482,13 @@ def main():
     parser.add_argument("dest_base_dir", help="Base directory where organized files will be stored.")
     parser.add_argument(
         "--copy",
+        "-c",
         action="store_true",
         help="Copy files instead of moving them. Preserves metadata."
     )
     parser.add_argument(
         "--delete-source-duplicates",
+        "-d",
         action="store_true",
         help="Delete source files if they are found to be exact duplicates of already processed/target files. "
              "Use with caution, especially with --copy."
