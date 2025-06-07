@@ -1,0 +1,6 @@
+source: /Volumes/external/Pictures_by_date
+target: /Volumes/external/Pictures_by_trip
+trips:
+- name: 2025-05 Sri Lanka
+  start_date: '2023-05-05'
+  end_date: '2025-05-15'
